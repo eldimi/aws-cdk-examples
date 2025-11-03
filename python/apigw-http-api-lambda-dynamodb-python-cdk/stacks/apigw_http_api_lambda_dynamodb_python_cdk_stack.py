@@ -7,9 +7,12 @@ from aws_cdk import (
     aws_dynamodb as dynamodb_,
     aws_lambda as lambda_,
     aws_apigateway as apigw_,
+    aws_wafv2 as waf_,
+    aws_logs as logs_,
     aws_ec2 as ec2,
     aws_iam as iam,
     Duration,
+    CfnOutput,
 )
 from constructs import Construct
 
@@ -88,8 +91,81 @@ class ApigwHttpApiLambdaDynamodbPythonCdkStack(Stack):
         api_hanlder.add_environment("TABLE_NAME", demo_table.table_name)
 
         # Create API Gateway
-        apigw_.LambdaRestApi(
+        api = apigw_.LambdaRestApi(
             self,
             "Endpoint",
             handler=api_hanlder,
+        )
+
+        # Create CloudWatch Log Group for WAF
+        waf_log_group = logs_.LogGroup(
+            self,
+            "WAFLogGroup",
+            log_group_name=f"/aws/wafv2/{construct_id}",
+            retention=logs_.RetentionDays.ONE_MONTH
+        )
+
+        # Create WAF WebACL with rate limiting (REL05-BP02)
+        web_acl = waf_.CfnWebACL(
+            self,
+            "APIGatewayWAF",
+            scope="REGIONAL",  # For API Gateway
+            default_action=waf_.CfnWebACL.DefaultActionProperty(allow={}),
+            rules=[
+                # Rate limiting rule - 100 requests per 5 minutes per IP
+                waf_.CfnWebACL.RuleProperty(
+                    name="RateLimitRule",
+                    priority=1,
+                    statement=waf_.CfnWebACL.StatementProperty(
+                        rate_based_statement=waf_.CfnWebACL.RateBasedStatementProperty(
+                            limit=100,  # 100 requests per 5 minutes
+                            aggregate_key_type="IP"
+                        )
+                    ),
+                    action=waf_.CfnWebACL.RuleActionProperty(
+                        block={}  # Block requests exceeding rate limit
+                    ),
+                    visibility_config=waf_.CfnWebACL.VisibilityConfigProperty(
+                        sampled_requests_enabled=True,
+                        cloud_watch_metrics_enabled=True,
+                        metric_name="RateLimitRule"
+                    )
+                )
+            ],
+            visibility_config=waf_.CfnWebACL.VisibilityConfigProperty(
+                sampled_requests_enabled=True,
+                cloud_watch_metrics_enabled=True,
+                metric_name="APIGatewayWAF"
+            )
+        )
+
+        # Associate WAF with API Gateway
+        waf_association = waf_.CfnWebACLAssociation(
+            self,
+            "WAFAssociation",
+            resource_arn=f"arn:aws:apigateway:{self.region}::/restapis/{api.rest_api_id}/stages/{api.deployment_stage.stage_name}",
+            web_acl_arn=web_acl.attr_arn
+        )
+
+        # Configure WAF logging
+        waf_logging = waf_.CfnLoggingConfiguration(
+            self,
+            "WAFLogging",
+            resource_arn=web_acl.attr_arn,
+            log_destination_configs=[waf_log_group.log_group_arn]
+        )
+
+        # Output important information
+        CfnOutput(
+            self,
+            "APIGatewayURL",
+            value=api.url,
+            description="API Gateway URL"
+        )
+        
+        CfnOutput(
+            self,
+            "WAFWebACLArn",
+            value=web_acl.attr_arn,
+            description="WAF WebACL ARN for monitoring"
         )
