@@ -81,15 +81,39 @@ class ApigwHttpApiLambdaDynamodbPythonCdkStack(Stack):
             ),
             memory_size=1024,
             timeout=Duration.minutes(5),
+            reserved_concurrent_executions=100,  # REL05-BP02: Limit Lambda concurrency
         )
 
         # grant permission to lambda to write to demo table
         demo_table.grant_write_data(api_hanlder)
         api_hanlder.add_environment("TABLE_NAME", demo_table.table_name)
 
-        # Create API Gateway
-        apigw_.LambdaRestApi(
+        # Create API Gateway with throttling configuration
+        api = apigw_.LambdaRestApi(
             self,
             "Endpoint",
             handler=api_hanlder,
+            default_throttle=apigw_.ThrottleSettings(
+                rate_limit=1000,  # REL05-BP02: 1000 requests per second
+                burst_limit=2000  # REL05-BP02: 2000 burst capacity
+            ),
+        )
+
+        # Create usage plan for API throttling
+        usage_plan = api.add_usage_plan(
+            "DefaultUsagePlan",
+            name="Default Usage Plan",
+            throttle=apigw_.ThrottleSettings(
+                rate_limit=1000,
+                burst_limit=2000
+            ),
+            quota=apigw_.QuotaSettings(
+                limit=10000,  # 10,000 requests per day
+                period=apigw_.Period.DAY
+            )
+        )
+
+        # Add API stage to usage plan
+        usage_plan.add_api_stage(
+            stage=api.deployment_stage
         )
